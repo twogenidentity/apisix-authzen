@@ -10,8 +10,7 @@ This project is provided as **open source** and **as is**, without any warranty 
 
 Enterprise support, SLAs, and commercial features are available via [TwoGenIdentity](https://twogenidentity.com).
 
-Originally designed and implemented by [Martin Besozzi](https://github.com/embesozzi).  
-Maintained under the [TwoGenIdentity](https://github.com/TwoGenIdentity) organization.
+Originally designed and implemented by [Martin Besozzi](https://github.com/embesozzi). Maintained under the [TwoGenIdentity](https://github.com/TwoGenIdentity) organization.
 
 
 ## Overview
