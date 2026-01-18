@@ -2,9 +2,14 @@
 
 An [Apache APISIX](https://apisix.apache.org/) plugin that implements the [AuthZEN](https://openid.net/specs/openid-authzen-authorization-api-1_0-ID1.html) authorization API standard, enabling standardized policy-based access control through any AuthZEN-compliant Policy Decision Point (PDP).
 
-## Support & Warranty Disclaimer
-
-This project is provided as **open source** and **as is**, without any warranty or guarantee of support. Community contributions are welcome, but maintenance and response times are best-effort.
+> [!CAUTION]
+> **Beta Software Notice: This software is currently in beta and is provided AS IS without any warranties.**
+>
+> - Not recommended for production use
+> - Issues and feedback should be reported via the GitHub issue tracker
+> - Maintenance and response times are best-effort
+>
+> By using this beta software, you acknowledge and accept these conditions.
 
 ## Commercial Support
 
