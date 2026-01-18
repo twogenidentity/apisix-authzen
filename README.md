@@ -11,13 +11,6 @@ An [Apache APISIX](https://apisix.apache.org/) plugin that implements the [AuthZ
 >
 > By using this beta software, you acknowledge and accept these conditions.
 
-## Commercial Support
-
-Enterprise support, SLAs, and commercial features are available via [TwoGenIdentity](https://twogenidentity.com).
-
-Originally designed and implemented by [Martin Besozzi](https://github.com/embesozzi). Maintained under the [TwoGenIdentity](https://github.com/TwoGenIdentity) organization.
-
-
 ## Overview
 
 ### Why AuthZEN?
@@ -366,5 +359,10 @@ For PDPs requiring authentication with custom HTTP settings:
 - [OpenFGA](https://openfga.dev/)
 - [Cerbos](https://cerbos.dev/)
 - [Apache APISIX](https://apisix.apache.org/)
+
+## Commercial Support
+
+Enterprise support, SLAs, and commercial features are available via [TwoGenIdentity](https://twogenidentity.com).
+Originally designed and implemented by [Martin Besozzi](https://github.com/embesozzi). Maintained under the [TwoGenIdentity](https://github.com/TwoGenIdentity) organization.
 
 Copyright 2026 TwoGenIdentity. All Rights Reserved.
