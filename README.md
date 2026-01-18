@@ -212,14 +212,6 @@ This uses the default AuthZEN Gateway Profile:
 - **Subject**: `type: "identity"`, `id: <JWT sub claim>`
 - **Resource**: `type: "route"`, `id: <request URI>`
 - **Action**: `name: <HTTP method>`
-- **Endpoint**: `POST {host}/access/v1/evaluation`
-
-**Test with curl:**
-
-```bash
-curl -X GET http://localhost:9080/api/products \
-  -H "Authorization: Bearer <jwt_token>"
-```
 
 **AuthZEN request sent to PDP:**
 
@@ -231,7 +223,7 @@ curl -X GET http://localhost:9080/api/products \
   },
   "resource": {
     "type": "route",
-    "id": "/api/products"
+    "id": "/api/protected"
   },
   "action": {
     "name": "GET"
