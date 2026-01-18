@@ -8,11 +8,11 @@ This project is provided as **open source** and **as is**, without any warranty 
 
 ## Commercial Support
 
-Production support, SLAs, roadmap commitments, and enterprise features are available through the commercial distribution provided by [TwoGenIdentity](https://twogenidentity.com).
+Enterprise support, SLAs, and commercial features are available via [TwoGenIdentity](https://twogenidentity.com).
 
-Originally designed and implemented by [Martin Besozzi](https://github.com/embesozzi).
-
+Originally designed and implemented by [Martin Besozzi](https://github.com/embesozzi).  
 Maintained under the [TwoGenIdentity](https://github.com/TwoGenIdentity) organization.
+
 
 ## Overview
 
