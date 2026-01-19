@@ -36,7 +36,7 @@ This plugin transforms Apache APISIX into an **AuthZEN-compliant PEP**, external
 - **OpenFGA** - Relationship-based access control (ReBAC)
 - **Cerbos** - Policy-based access control (PBAC)
 
-Should be compatible with **Any AuthZEN-compliant PDP**..
+Should be compatible with **Any AuthZEN-compliant PDP**.
 ## Architecture
 
 ### Components Overview
