@@ -13,6 +13,38 @@ An [Apache APISIX](https://apisix.apache.org/) plugin that implements the [AuthZ
 
 ## Overview
 
+### Main Features
+
+This development transforms Apache APISIX into an **AuthZEN-compliant PEP**, externalizing authorization decisions to any AuthZEN-compatible PDP. This approach:
+
+- **Secures AI/MCP tool calls** - Authorize Model Context Protocol (MCP) requests with fine-grained access control
+- **Centralizes decision-making** - Easier to manage and update policies across all applications
+- **Decouples authorization from code** - Improves security, flexibility, and maintainability
+- **Enables scalability** - Consistent enforcement across all protected resources
+
+
+| Category | Feature | Description |
+|--------|--------|-------------|
+| **Core** | Standardized AuthZEN Enforcement | Acts as an AuthZEN-compliant **Policy Enforcement Point (PEP)** for APIs and MCP requests, delegating authorization decisions to external Policy Decision Points (PDPs). |
+| **OAuth / JWT Security** | JWT-Based Subject Identification | Extracts the subject identity dynamically from JWT claims (e.g., `sub`, `preferred_username`) and maps it to the AuthZEN `subject.id`. |
+|  | Dynamic JWT Context Extraction | Maps arbitrary JWT claims into AuthZEN `subject.properties` (e.g., roles, tenant, email) for attribute-based and relationship-based authorization. |
+|  | OIDC/OAuth Integration | Designed to work alongside the APISIX OIDC plugin, assuming tokens are validated upstream before authorization. |
+| **API Security** | Dynamic Resource Mapping | Builds AuthZEN resource identifiers dynamically from request URI, static values, or other supported sources. |
+|  | HTTP Method–Based Actions | Maps HTTP methods (`GET`, `POST`, etc.) or static values into AuthZEN `action.name`. |
+| **AI / MCP Security** | MCP-Aware Policy Enforcement | Understands MCP JSON-RPC requests and enforces authorization specifically on MCP workflows rather than treating them as generic HTTP calls. |
+|  | Selective MCP Enforcement | Configures which MCP methods trigger authorization (e.g., `tools/call`), while allowing others (`initialize`, `tools/list`) to pass through. |
+|  | Dynamic MCP Context Extraction | Extracts MCP-specific context (tool names, arguments, and parameters) and maps it directly into AuthZEN resource and action fields. |
+|  | Tool-Level Authorization | Enables per-tool authorization by mapping MCP tool names (`params.name`) to AuthZEN resources. |
+|  | Argument-Driven Actions | Allows MCP tool arguments (e.g., `action=delete`) to dynamically define the AuthZEN `action.name`. |
+
+
+### Tested PDP Backends
+
+- **OpenFGA** - Relationship-based access control (ReBAC)
+- **Cerbos** - Policy-based access control (PBAC)
+
+Should be compatible with **Any AuthZEN-compliant PDP**.
+
 ### Why AuthZEN?
 
 Access control failures are the #1 security risk in the [OWASP Top 10 (2021)](https://owasp.org/Top10/A01_2021-Broken_Access_Control/). Traditional authorization approaches suffer from:
@@ -23,20 +55,7 @@ Access control failures are the #1 security risk in the [OWASP Top 10 (2021)](ht
 
 The [OpenID Foundation AuthZEN Working Group](https://openid.net/wg/authzen/) addresses these challenges by standardizing authorization interactions based on the **P\*P architecture** principles, enabling interoperability between Policy Enforcement Points (PEP) and Policy Decision Points (PDP).
 
-### What This Plugin Does
 
-This plugin transforms Apache APISIX into an **AuthZEN-compliant PEP**, externalizing authorization decisions to any AuthZEN-compatible PDP. This approach:
-
-- **Centralizes decision-making** - Easier to manage and update policies across all applications
-- **Decouples authorization from code** - Improves security, flexibility, and maintainability
-- **Enables scalability** - Consistent enforcement across all protected resources
-
-### Tested PDP Backends
-
-- **OpenFGA** - Relationship-based access control (ReBAC)
-- **Cerbos** - Policy-based access control (PBAC)
-
-Should be compatible with **Any AuthZEN-compliant PDP**.
 ## Architecture
 
 ### Components Overview
@@ -84,7 +103,7 @@ Should be compatible with **Any AuthZEN-compliant PDP**.
 ```mermaid
 sequenceDiagram
     participant App
-    participant PEP as API / AI Gateway <br/> (AuthZEN PDP)
+    participant PEP as API / AI Gateway <br/> (AuthZEN PEP)
     participant PDP as AuthZEN PDP
     participant API as API / MCP
 
@@ -121,13 +140,16 @@ sequenceDiagram
 | http.keepalive_pool | integer | No | `5` | Keepalive connection pool size |
 | **subject** | object | No | | Subject configuration for AuthZEN request |
 | subject.type | string | No | `identity` | Subject type in AuthZEN request |
-| subject.id | string | No | `claim::sub` | Subject ID source: `claim::<claim_name>` for JWT claim extraction |
+| subject.id | string | No | `claim::sub` | Subject ID source (see [Value Extraction Syntax](#value-extraction-syntax)) |
 | subject.properties | array | No | | Array of JWT claim mappings to subject properties |
 | **resource** | object | No | | Resource configuration for AuthZEN request |
 | resource.type | string | No | `route` | Resource type in AuthZEN request |
-| resource.id | string | No | `uri` | Resource ID source: `uri` for request URI or static value |
+| resource.id | string | No | `uri` | Resource ID source (see [Value Extraction Syntax](#value-extraction-syntax)) |
 | **action** | object | No | | Action configuration for AuthZEN request |
-| action.name | string | No | `method` | Action name source: `method` for HTTP method or static value |
+| action.name | string | No | `method` | Action name source: `method` for HTTP method (see [Value Extraction Syntax](#value-extraction-syntax)) |
+| **mcp** | object | No | | MCP (Model Context Protocol) configuration |
+| mcp.enforce_on | object | No | | Selective enforcement configuration |
+| mcp.enforce_on.methods | array | No | `[]` | MCP JSON-RPC methods to enforce authorization on (e.g., `["tools/call"]`). If empty, all requests are enforced. |
 
 ### Subject Properties Schema
 
@@ -137,6 +159,23 @@ Each item in `subject.properties` array:
 |------|------|----------|-------------|
 | key | string | Yes | Property name in AuthZEN request |
 | claim | string | Yes | JWT claim path (e.g., `realm_access.roles`, `tenant`) |
+
+
+### Value Extraction Syntax
+
+The `subject.id`, `resource.id`, and `action.name` fields support dynamic value extraction using the following syntax:
+
+| Syntax | Source | Example |
+|--------|--------|---------|
+| `claim::<name>` | JWT claim | `claim::sub`, `claim::preferred_username` |
+| `mcp::tool::name` | MCP tool name from JSON-RPC body | Tool name from `params.name` |
+| `mcp::tool::arguments::<arg>` | MCP tool argument | `mcp::tool::arguments::tenant` |
+| `uri` | HTTP request URI | `/api/v1/products` |
+| `method` | HTTP method | `GET`, `POST` |
+| (static value) | Literal string | `user`, `document`, `read` |
+
+
+> **IMPORTANT:** This plugin assumes a valid JWT. You must configure the APISIX OIDC plugin with higher priority to validate the token before AuthZEN authorization is evaluated.
 
 ## AuthZEN Request Format
 
@@ -178,17 +217,6 @@ The plugin expects a standard AuthZEN response:
 | PDP unavailable | 503 Service Unavailable | Authorization service error |
 | Missing JWT claim | 401 Unauthorized | Required claim not found |
 
-## Access Flow
-
-1. Client sends API request with JWT bearer token
-2. Plugin extracts subject ID from configured JWT claim (default: `sub`)
-3. Plugin extracts resource ID from request URI (or configured static value)
-4. Plugin extracts action name from HTTP method (or configured static value)
-5. Plugin sends AuthZEN evaluation request to PDP
-6. PDP returns decision (`true` or `false`)
-7. Plugin allows request to proceed or returns 403
-
-> **Important:** This plugin assumes a valid JWT. You must configure the APISIX OIDC plugin with higher priority to validate the token before AuthZEN authorization is evaluated.
 
 ## Examples
 
@@ -348,9 +376,136 @@ For PDPs requiring authentication with custom HTTP settings:
   }
 }
 ```
+</details>
+
+<details>
+<summary><strong>Example 6: MCP Tool Authorization</strong></summary>
+
+Authorize AI/MCP tool calls:
+
+**Plugin Configuration:**
+```json
+{
+  "pdp": {
+    "host": "http://localhost:8080",
+  },
+  "subject": {
+    "type": "user",
+    "id": "claim::sub"
+  },
+  "resource": {
+    "type": "tool",
+    "id": "mcp::tool::name"
+  },
+  "action": {
+    "name": "execute"
+  }
+}
+```
+
+**MCP Request Body:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "fintech_list_expenses",
+    "arguments": {
+      "tenant": "tenant1"
+    }
+  }
+}
+```
+
+**AuthZEN request sent to PDP:**
+```json
+{
+  "subject": {
+    "type": "user",
+    "id": "214cc559-1bd1-4436-ab82-621f3a414b34"
+  },
+  "resource": {
+    "type": "tool",
+    "id": "fintech_list_expenses"
+  },
+  "action": {
+    "name": "execute"
+  }
+}
+```
 
 </details>
 
+<details>
+<summary><strong>Example 7: MCP Selective Enforcement (Only tools/call)</strong></summary>
+
+Enforce authorization only for `tools/call` requests, allowing other MCP methods like `initialize` and `tools/list` to pass through without authorization:
+
+**Plugin Configuration:**
+```json
+{
+  "pdp": {
+    "host": "http://localhost:8080",
+  },
+  "mcp": {
+    "enforce_on": {
+      "methods": ["tools/call"]
+    }
+  },
+  "subject": {
+    "type": "user",
+    "id": "claim::sub"
+  },
+  "resource": {
+    "type": "mcp",
+    "id": "bank"
+  },
+  "action": {
+    "name": "mcp::tool::name"
+  }
+}
+```
+
+**Behavior:**
+
+| MCP Method | Authorization |
+|------------|---------------|
+| `tools/call` | Enforced |
+| `initialize` | Skipped (allowed) |
+| `tools/list` | Skipped (allowed) |
+| `resources/list` | Skipped (allowed) |
+
+**MCP Request (tools/call - enforced):**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "fintech_list_expenses",
+    "arguments": { "tenant": "tenant1" }
+  }
+}
+```
+→ Authorization check performed, AuthZEN request sent to PDP
+
+**MCP Request (initialize - skipped):**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {}
+  }
+}
+```
+→ Request passes through without authorization
+
+**Note:** If the `mcp.enforce_on` configuration is not provided or `methods` is empty, all requests are enforced (backward compatible behavior).
+</details>
 
 ## References
 

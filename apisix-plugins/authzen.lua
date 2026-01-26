@@ -87,7 +87,7 @@ local schema = {
                 id = {
                     type = "string",
                     default = "claim::sub",
-                    description = "Subject ID source: 'claim::<claim_name>' for JWT claim"
+                    description = "Subject ID source: 'claim::<name>' for JWT claim, 'mcp::tool::name' for MCP tool name, 'mcp::tool::arguments::<arg>' for MCP arguments, or static value"
                 },
                 properties = {
                     type = "array",
@@ -124,7 +124,7 @@ local schema = {
                 id = {
                     type = "string",
                     default = "uri",
-                    description = "Resource ID source: 'uri' for request URI or static value"
+                    description = "Resource ID source: 'uri' for request URI, 'claim::<name>' for JWT claim, 'mcp::tool::name' for MCP tool name, 'mcp::tool::arguments::<arg>' for MCP arguments, or static value"
                 }
             },
             default = {
@@ -138,11 +138,27 @@ local schema = {
                 name = {
                     type = "string",
                     default = "method",
-                    description = "Action name source: 'method' for HTTP method or static value"
+                    description = "Action name source: 'method' for HTTP method, 'claim::<name>' for JWT claim, 'mcp::tool::name' for MCP tool name, 'mcp::tool::arguments::<arg>' for MCP arguments, or static value"
                 }
             },
             default = {
                 name = "method"
+            }
+        },
+        mcp = {
+            type = "object",
+            properties = {
+                enforce_on = {
+                    type = "object",
+                    properties = {
+                        methods = {
+                            type = "array",
+                            items = { type = "string" },
+                            default = {},
+                            description = "MCP JSON-RPC methods to enforce authorization on (e.g., 'tools/call'). If empty or not set, all requests are enforced."
+                        }
+                    }
+                }
             }
         }
     },
@@ -301,6 +317,136 @@ local function split_path(path, delimiter)
 end
 
 
+local function get_mcp_request_body(ctx)
+    if ctx.mcp_body then
+        return ctx.mcp_body, nil
+    end
+
+    local body, err = core.request.get_body()
+    if not body then
+        log.debug("[authzen] no request body available: ", err or "unknown")
+        return nil, "no request body available"
+    end
+
+    local json_body, decode_err = core.json.decode(body)
+    if not json_body then
+        log.debug("[authzen] failed to parse request body as JSON: ", decode_err or "unknown")
+        return nil, "failed to parse request body as JSON"
+    end
+
+    ctx.mcp_body = json_body
+    return json_body, nil
+end
+
+
+local function get_mcp_value(ctx, mcp_path)
+    -- mcp_path examples: "tool::name", "tool::arguments::tenant"
+    local parts = split_path(mcp_path, "::")
+
+    if #parts < 2 then
+        return nil, "invalid mcp path: " .. mcp_path
+    end
+
+    local category = parts[1]  -- "tool"
+
+    if category ~= "tool" then
+        return nil, "unsupported mcp category: " .. category
+    end
+
+    local mcp_body, err = get_mcp_request_body(ctx)
+    if not mcp_body then
+        return nil, err
+    end
+
+    local field = parts[2]  -- "name" or "arguments"
+
+    if field == "name" then
+        -- mcp::tool::name -> params.name
+        if mcp_body.params and mcp_body.params.name then
+            return mcp_body.params.name, nil
+        end
+        return nil, "MCP params.name not found"
+
+    elseif field == "arguments" then
+        -- mcp::tool::arguments::<arg> -> params.arguments.<arg>
+        if #parts < 3 then
+            return nil, "mcp::tool::arguments requires argument name"
+        end
+
+        local arg_name = parts[3]
+        if mcp_body.params and mcp_body.params.arguments then
+            local value = mcp_body.params.arguments[arg_name]
+            if value ~= nil then
+                return value, nil
+            end
+        end
+        return nil, "MCP argument '" .. arg_name .. "' not found"
+    end
+
+    return nil, "unsupported mcp field: " .. field
+end
+
+
+local function should_enforce_mcp(conf, ctx)
+    -- If no mcp.enforce_on config or no methods, always enforce (backward compatible)
+    if not conf.mcp or not conf.mcp.enforce_on then
+        log.debug("[authzen] mcp.enforce_on config not set, enforcing all requests")
+        return true
+    end
+
+    if not conf.mcp.enforce_on.methods or #conf.mcp.enforce_on.methods == 0 then
+        log.debug("[authzen] mcp.enforce_on.methods empty, enforcing all requests")
+        return true
+    end
+
+    log.debug("[authzen] mcp.enforce_on.methods configured: ", core.json.encode(conf.mcp.enforce_on.methods))
+
+    -- Parse MCP body to get method
+    local mcp_body, err = get_mcp_request_body(ctx)
+    if not mcp_body or not mcp_body.method then
+        
+        -- Not a valid MCP request, enforce anyway
+        log.debug("[authzen] could not parse MCP body or method not found, enforcing authorization")
+        return true
+    end
+
+    -- Check if method is in enforce list
+    for _, method in ipairs(conf.mcp.enforce_on.methods) do
+        if mcp_body.method == method then
+            log.debug("[authzen] MCP method '", mcp_body.method, "' is in enforce list")
+            return true
+        end
+    end
+
+    -- Method not in list, skip enforcement
+    log.info("[authzen] MCP method '", mcp_body.method, "' not in enforce list, skipping authorization")
+    return false
+end
+
+
+local function resolve_value(conf_value, ctx)
+    if conf_value:sub(1, 7) == "claim::" then
+        local claim_name = conf_value:sub(8)
+        local authorization_header = core.request.header(ctx, "Authorization")
+        return get_jwt_claim_value(authorization_header, claim_name)
+
+    elseif conf_value:sub(1, 5) == "mcp::" then
+        local mcp_path = conf_value:sub(6)
+        return get_mcp_value(ctx, mcp_path)
+
+    elseif conf_value == "uri" then
+        return ctx.var.uri, nil
+
+    elseif conf_value == "method" then
+        return ctx.var.request_method, nil
+
+    else
+        -- Static value
+        return conf_value, nil
+    end
+end
+
+
 local function get_nested_claim(payload, claim_path)
     local parts = split_path(claim_path, ".")
     local value = payload
@@ -357,40 +503,46 @@ end
 
 local function get_subject_id(conf, ctx)
     local subject_id_source = conf.subject and conf.subject.id or "claim::sub"
-    
-    if subject_id_source:sub(1, 7) == "claim::" then
-        local claim_name = subject_id_source:sub(8)
-        local authorization_header = core.request.header(ctx, "Authorization")
-        return get_jwt_claim_value(authorization_header, claim_name)
-    end
-
-    return subject_id_source, nil
+    return resolve_value(subject_id_source, ctx)
 end
 
 
 local function get_resource_id(conf, ctx)
     local resource_id_source = conf.resource and conf.resource.id or "uri"
-
-    if resource_id_source == "uri" then
-        return ctx.var.uri, nil
-    end
-
-    return resource_id_source, nil
+    return resolve_value(resource_id_source, ctx)
 end
 
 
 local function get_action_name(conf, ctx)
     local action_name_source = conf.action and conf.action.name or "method"
+    return resolve_value(action_name_source, ctx)
+end
 
-    if action_name_source == "method" then
-        return ctx.var.request_method, nil
+
+local function trace_request(ctx)
+    log.info("[authzen] === Request Trace ===")
+    log.info("[authzen] Method: ", ctx.var.request_method)
+    log.info("[authzen] URI: ", ctx.var.uri)
+    log.info("[authzen] Query params: ", ctx.var.args or "none")
+
+    local headers = core.request.headers(ctx)
+    if headers then
+        log.info("[authzen] Headers: ", core.json.encode(headers))
     end
 
-    return action_name_source, nil
+    local body, _ = core.request.get_body()
+    if body then
+        log.info("[authzen] Body: ", body)
+    else
+        log.info("[authzen] Body: none")
+    end
+    log.info("[authzen] === End Request Trace ===")
 end
 
 
 local function build_authzen_request(conf, ctx)
+    -- trace_request(ctx)
+
     local subject_id, err = get_subject_id(conf, ctx)
     if not subject_id then
         return nil, "failed to get subject ID: " .. (err or "unknown error")
@@ -437,7 +589,13 @@ end
 
 
 function _M.access(conf, ctx)
-    log.info("[authzen] starting authorization check")
+    log.info("[authzen] starting authzen evaluation")
+
+    -- Check if we should enforce for this MCP method
+    if not should_enforce_mcp(conf, ctx) then
+        log.info("[authzen] skipping authorization - MCP method not in enforce list")
+        return
+    end
 
     local authzen_request, err = build_authzen_request(conf, ctx)
     if not authzen_request then
@@ -507,6 +665,5 @@ function _M.access(conf, ctx)
 
     log.info("[authzen] access granted for subject: ", authzen_request.subject.id)
 end
-
 
 return _M
