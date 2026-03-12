@@ -158,8 +158,18 @@ local schema = {
                             description = "MCP JSON-RPC methods to enforce authorization on (e.g., 'tools/call'). If empty or not set, all requests are enforced."
                         }
                     }
+                },
+                path = {
+                    type = "string",
+                    default = "/mcp",
+                    description = "URI path of the MCP endpoint. GET and DELETE requests to this path skip PDP enforcement (SSE connection and session termination). Other paths are always enforced."
                 }
             }
+        },
+        realm = {
+            type = "string",
+            default = "mcp",
+            description = "Bearer realm value returned in WWW-Authenticate on 401"
         }
     },
     required = {"pdp"}
@@ -401,6 +411,17 @@ local function should_enforce_mcp(conf, ctx)
 
     log.debug("[authzen] mcp.enforce_on.methods configured: ", core.json.encode(conf.mcp.enforce_on.methods))
 
+    -- GET requests are SSE connections (no body), DELETE requests are session termination (no body)
+    -- Neither can contain MCP JSON-RPC methods, so skip PDP enforcement.
+    -- Defense-in-depth: exemption is scoped to the configured MCP path to prevent bypass on broad routes.
+    local mcp_path = (conf.mcp and conf.mcp.path) or "/mcp"
+    local skip_methods = { GET = true, DELETE = true }
+    -- if skip_methods[ctx.var.request_method] and ctx.var.uri == mcp_path then
+    if skip_methods[ctx.var.request_method] then
+        log.info("[authzen] ", ctx.var.request_method, " request to MCP endpoint (", mcp_path, "), skipping PDP enforcement")
+        return false
+    end
+
     -- Parse MCP body to get method
     local mcp_body, err = get_mcp_request_body(ctx)
     if not mcp_body or not mcp_body.method then
@@ -588,9 +609,34 @@ local function build_authzen_request(conf, ctx)
 end
 
 
+local function get_bearer_token(ctx)
+    local auth_header = core.request.header(ctx, "Authorization")
+    if not auth_header or not string.find(auth_header, "Bearer ", 1, true) then
+        return nil
+    end
+    return string.sub(auth_header, 8)  -- trim "Bearer "
+end
+
+
 function _M.access(conf, ctx)
     log.info("[authzen] starting authzen evaluation")
+    -- trace_request(ctx)
 
+    -- [MCP] Require bearer token; advertise resource_metadata on 401
+    local token = get_bearer_token(ctx)
+    if not token then
+        local scheme = ngx.var.scheme or "https"
+        local host   = ngx.var.host   or "localhost"
+        local resource_metadata_url = scheme .. "://" .. host .. "/.well-known/oauth-protected-resource"
+        local realm = (conf.realm or "mcp")
+        
+        ngx.header["WWW-Authenticate"] = 'Bearer realm="' .. realm
+            .. '", error="invalid_token" , error_description="The access token is expired, revoked, malformed, or invalid", resource_metadata= "'
+        
+        log.error("[authzen] no bearer token, returning 401")
+        return 401 
+    end
+    
     -- Check if we should enforce for this MCP method
     if not should_enforce_mcp(conf, ctx) then
         log.info("[authzen] skipping authorization - MCP method not in enforce list")
