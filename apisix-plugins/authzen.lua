@@ -411,9 +411,7 @@ local function should_enforce_mcp(conf, ctx)
 
     log.debug("[authzen] mcp.enforce_on.methods configured: ", core.json.encode(conf.mcp.enforce_on.methods))
 
-    -- GET requests are SSE connections (no body), DELETE requests are session termination (no body)
-    -- Neither can contain MCP JSON-RPC methods, so skip PDP enforcement.
-    -- Defense-in-depth: exemption is scoped to the configured MCP path to prevent bypass on broad routes.
+    -- GET=SSE, DELETE=session termination; no bodies, no MCP RPCs; PDP skipped only on configured MCP path.
     local mcp_path = (conf.mcp and conf.mcp.path) or "/mcp"
     local skip_methods = { GET = true, DELETE = true }
     -- if skip_methods[ctx.var.request_method] and ctx.var.uri == mcp_path then
