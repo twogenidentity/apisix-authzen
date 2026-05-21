@@ -1,0 +1,60 @@
+services:
+  etcd:
+    image: bitnamilegacy/etcd:3.4.9
+    environment:
+      ETCD_ENABLE_V2: "true"
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://etcd:2379"
+      ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - test-net
+
+  apisix:
+    image: ${APISIX_IMAGE}
+    restart: on-failure
+    depends_on:
+      etcd:
+        condition: service_healthy
+    volumes:
+      - ./apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ../apisix-plugins/authzen.lua:/usr/local/apisix/apisix/plugins/authzen.lua:ro
+    ports:
+      - "9080:9080"
+      - "9180:9180"
+    networks:
+      - test-net
+
+  mock-pdp:
+    build:
+      context: ./mock-pdp
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - test-net
+
+  upstream:
+    image: nginx:alpine
+    volumes:
+      - ./upstream/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - test-net
+
+  mock-mcp-upstream:
+    build:
+      context: ./mock-mcp-upstream
+    networks:
+      - test-net
+
+networks:
+  test-net:
+    driver: bridge
