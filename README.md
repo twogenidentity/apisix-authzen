@@ -12,12 +12,13 @@ This development transforms Apache APISIX into an **AuthZEN-compliant PEP**, ext
 - **Centralizes decision-making** - Easier to manage and update policies across all applications
 - **Decouples authorization from code** - Improves security, flexibility, and maintainability
 - **Enables scalability** - Consistent enforcement across all protected resources
-
 - **AuthZEN-compliant PEP** — Delegates authorization decisions to any AuthZEN-compatible PDP for APIs and MCP requests
+
+Features:
 - **JWT-Based Subject Identification** — Extracts subject identity dynamically from JWT claims (e.g., `sub`, `preferred_username`)
 - **Dynamic JWT Context Extraction** — Maps JWT claims into AuthZEN `subject.properties` for attribute-based and relationship-based authorization
 - **Dynamic Resource & Action Mapping** — Builds AuthZEN resource identifiers from request URI, static values, or MCP context; maps HTTP methods or MCP tool arguments to actions
-- **Authenticated PDP Calls** — Supports static API keys and OAuth2 `client_credentials` for gateway→PDP authentication, with automatic token caching and renewal
+- **Authenticated PDP Calls** — Supports static API keys and OAuth2 credentials for gateway → PDP authentication, with automatic token caching and renewal
 - **MCP-Aware Policy Enforcement** — Understands MCP JSON-RPC requests; enforces per-tool authorization with selective enforcement on specific methods
 - **OIDC/OAuth Integration** — Works alongside the APISIX OIDC plugin; assumes tokens are validated upstream before authorization
 
