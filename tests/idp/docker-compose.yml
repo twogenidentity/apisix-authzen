@@ -23,7 +23,7 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: admin
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME: "http://keycloak:8080"
-      KC_HOSTNAME_STRICT: "true"
+      KC_HOSTNAME_STRICT: "false"
       KC_LOG_LEVEL: WARN
     ports:
       - "8090:8080"
@@ -91,6 +91,46 @@ services:
   mock-mcp-upstream:
     build:
       context: ../mock-mcp-upstream
+    networks:
+      - idp-test-net
+
+  keycloak-authzen:
+    image: quay.io/keycloak/keycloak:nightly
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: "http://keycloak-authzen:8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_FEATURES: authzen
+      KC_LOG_LEVEL: org.keycloak.authorization:debug,warn
+      JAVA_OPTS_APPEND: >-
+        -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8787
+    ports:
+      - "8091:8080"
+      - "8787:8787"
+    healthcheck:
+      test: ["CMD", "/opt/keycloak/bin/kcadm.sh", "config", "credentials",
+             "--server", "http://localhost:8080",
+             "--realm", "master",
+             "--user", "admin",
+             "--password", "admin"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - idp-test-net
+
+  keycloak-authzen-bootstrap:
+    image: quay.io/keycloak/keycloak:nightly
+    depends_on:
+      keycloak-authzen:
+        condition: service_healthy
+    volumes:
+      - ./keycloak/bootstrap-authzen.sh:/bootstrap-authzen.sh:ro
+    entrypoint: ["bash", "/bootstrap-authzen.sh"]
     networks:
       - idp-test-net
 

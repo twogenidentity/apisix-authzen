@@ -31,9 +31,45 @@ local schema = {
                     default = "discover",
                     description = "For OpenFGA: 'discover' to auto-discover store_id, or specify store_id directly"
                 },
-                api_key = {
-                    type = "string",
-                    description = "Optional API key for PDP authentication"
+                auth = {
+                    type = "object",
+                    description = "Authentication for the PDP endpoint",
+                    properties = {
+                        api_key = {
+                            type = "string",
+                            description = "Static API key (mutually exclusive with oauth2)"
+                        },
+                        oauth2 = {
+                            type = "object",
+                            description = "OAuth2 client credentials (mutually exclusive with api_key)",
+                            properties = {
+                                token_url = {
+                                    type = "string",
+                                    description = "Token endpoint URL"
+                                },
+                                grant_type = {
+                                    type = "string",
+                                    enum = {"client_credentials"},
+                                    default = "client_credentials",
+                                    description = "OAuth2 grant type"
+                                },
+                                client_id = {
+                                    type = "string",
+                                    description = "OAuth2 client ID"
+                                },
+                                client_secret = {
+                                    type = "string",
+                                    description = "OAuth2 client secret"
+                                },
+                                scopes = {
+                                    type = "array",
+                                    items = { type = "string" },
+                                    description = "OAuth2 scopes to request"
+                                }
+                            },
+                            required = {"token_url", "client_id", "client_secret"}
+                        }
+                    }
                 }
             },
             required = {"host"}
@@ -177,15 +213,24 @@ local schema = {
 
 
 local _M = {
-    version = 0.1,
+    version = 0.3,
     priority = 2599,
     name = plugin_name,
-    schema = schema
+    schema = schema,
+    encrypt_fields = {"pdp.auth.oauth2.client_secret"}
 }
 
 
 function _M.check_schema(conf)
-    return core.schema.check(schema, conf)
+    local ok, err = core.schema.check(schema, conf)
+    if not ok then
+        return false, err
+    end
+    local auth = conf.pdp.auth
+    if auth and auth.api_key and auth.oauth2 then
+        return false, "pdp.auth.api_key and pdp.auth.oauth2 are mutually exclusive"
+    end
+    return true
 end
 
 
@@ -206,6 +251,81 @@ local function cache_get(key)
         return dict:get(key)
     end
     return nil
+end
+
+
+local function fetch_pdp_token(conf)
+    local oauth2 = conf.pdp.auth.oauth2
+    local cache_key = "oauth2_token:" .. oauth2.token_url .. ":" .. oauth2.client_id
+
+    local cached = cache_get(cache_key)
+    if cached then
+        log.debug("[authzen] using cached PDP token for client_id: ", oauth2.client_id)
+        return cached, nil
+    end
+
+    log.debug("[authzen] fetching PDP token from: ", oauth2.token_url)
+
+    local http_conf = conf.http or {}
+    local body_args = {
+        grant_type    = "client_credentials",
+        client_id     = oauth2.client_id,
+        client_secret = oauth2.client_secret,
+    }
+    if oauth2.scopes and #oauth2.scopes > 0 then
+        body_args.scope = table.concat(oauth2.scopes, " ")
+    end
+
+    local httpc = http.new()
+    httpc:set_timeout(http_conf.timeout or 3000)
+
+    local res, err = httpc:request_uri(oauth2.token_url, {
+        method  = "POST",
+        body    = ngx.encode_args(body_args),
+        headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+        ssl_verify = http_conf.ssl_verify,
+    })
+
+    if not res then
+        log.error("[authzen] token endpoint unreachable: ", err)
+        return nil, "token endpoint unreachable: " .. (err or "unknown")
+    end
+
+    if res.status ~= 200 then
+        log.error("[authzen] token endpoint returned status: ", res.status, " body: ", res.body)
+        return nil, "token endpoint returned status " .. res.status
+    end
+
+    local json, decode_err = core.json.decode(res.body)
+    if not json or not json.access_token then
+        log.error("[authzen] invalid token response: ", decode_err or res.body)
+        return nil, "invalid token response"
+    end
+
+    local ttl = math.max((json.expires_in or 300) - 10, 1)
+    cache_set(cache_key, json.access_token, ttl)
+
+    log.info("[authzen] fetched and cached PDP token (ttl=", ttl, "s) for client_id: ", oauth2.client_id)
+    return json.access_token, nil
+end
+
+
+local function get_pdp_auth_header(conf)
+    local auth = conf.pdp.auth
+    if not auth then
+        return nil, nil
+    end
+    if auth.oauth2 then
+        local token, err = fetch_pdp_token(conf)
+        if not token then
+            return nil, err
+        end
+        return "Bearer " .. token, nil
+    end
+    if auth.api_key then
+        return auth.api_key, nil
+    end
+    return nil, nil
 end
 
 
@@ -233,8 +353,13 @@ local function discover_openfga_store_id(conf)
         params.keepalive_pool = http_conf.keepalive_pool
     end
 
-    if conf.pdp.api_key then
-        params.headers["Authorization"] = conf.pdp.api_key
+    local auth_header, auth_err = get_pdp_auth_header(conf)
+    if auth_err then
+        log.error("[authzen] failed to get PDP auth header for discovery: ", auth_err)
+        return nil, "failed to authenticate with PDP: " .. auth_err
+    end
+    if auth_header then
+        params.headers["Authorization"] = auth_header
     end
 
     local endpoint = conf.pdp.host .. "/stores"
@@ -654,8 +779,13 @@ function _M.access(conf, ctx)
         ["Content-Type"] = "application/json"
     }
 
-    if conf.pdp.api_key then
-        headers["Authorization"] = conf.pdp.api_key
+    local auth_header, auth_err = get_pdp_auth_header(conf)
+    if auth_err then
+        log.error("[authzen] failed to get PDP auth header: ", auth_err)
+        return 503, {message = "Authorization service unavailable"}
+    end
+    if auth_header then
+        headers["Authorization"] = auth_header
     end
 
     local http_conf = conf.http or {}

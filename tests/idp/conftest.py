@@ -7,7 +7,7 @@ import time
 import pytest
 import requests
 
-from helpers import APISIX_ADMIN, APISIX_PROXY, ADMIN_KEY, KEYCLOAK, MOCK_PDP, wait_for
+from helpers import APISIX_ADMIN, APISIX_PROXY, ADMIN_KEY, KEYCLOAK, KEYCLOAK_AUTHZEN, MOCK_PDP, wait_for
 
 _http_log = logging.getLogger("apisix")
 _route_log = logging.getLogger("route")
@@ -42,6 +42,8 @@ def services_ready():
     wait_for(f"{APISIX_ADMIN}/apisix/admin/routes", headers={"X-API-KEY": ADMIN_KEY})
     # Keycloak + bootstrap complete when the test realm is reachable
     wait_for(f"{KEYCLOAK}/realms/test")
+    # Keycloak AuthZEN + bootstrap complete when the demo realm is reachable
+    wait_for(f"{KEYCLOAK_AUTHZEN}/realms/demo")
     wait_for(f"{MOCK_PDP}/health")
     time.sleep(2)
 

@@ -2,15 +2,6 @@
 
 An [Apache APISIX](https://apisix.apache.org/) plugin that implements the [AuthZEN](https://openid.net/specs/openid-authzen-authorization-api-1_0-ID1.html) authorization API standard, enabling standardized policy-based access control through any AuthZEN-compliant Policy Decision Point (PDP).
 
-> [!CAUTION]
-> **Beta Software Notice: This software is currently in beta and is provided AS IS without any warranties.**
->
-> - Not recommended for production use
-> - Issues and feedback should be reported via the GitHub issue tracker
-> - Maintenance and response times are best-effort
->
-> By using this beta software, you acknowledge and accept these conditions.
-
 ## Overview
 
 ### Main Features
@@ -22,26 +13,20 @@ This development transforms Apache APISIX into an **AuthZEN-compliant PEP**, ext
 - **Decouples authorization from code** - Improves security, flexibility, and maintainability
 - **Enables scalability** - Consistent enforcement across all protected resources
 
-
-| Category | Feature | Description |
-|--------|--------|-------------|
-| **Core** | Standardized AuthZEN Enforcement | Acts as an AuthZEN-compliant **Policy Enforcement Point (PEP)** for APIs and MCP requests, delegating authorization decisions to external Policy Decision Points (PDPs). |
-| **OAuth / JWT Security** | JWT-Based Subject Identification | Extracts the subject identity dynamically from JWT claims (e.g., `sub`, `preferred_username`) and maps it to the AuthZEN `subject.id`. |
-|  | Dynamic JWT Context Extraction | Maps arbitrary JWT claims into AuthZEN `subject.properties` (e.g., roles, tenant, email) for attribute-based and relationship-based authorization. |
-|  | OIDC/OAuth Integration | Designed to work alongside the APISIX OIDC plugin, assuming tokens are validated upstream before authorization. |
-| **API Security** | Dynamic Resource Mapping | Builds AuthZEN resource identifiers dynamically from request URI, static values, or other supported sources. |
-|  | HTTP Method–Based Actions | Maps HTTP methods (`GET`, `POST`, etc.) or static values into AuthZEN `action.name`. |
-| **AI / MCP Security** | MCP-Aware Policy Enforcement | Understands MCP JSON-RPC requests and enforces authorization specifically on MCP workflows rather than treating them as generic HTTP calls. |
-|  | Selective MCP Enforcement | Configures which MCP methods trigger authorization (e.g., `tools/call`), while allowing others (`initialize`, `tools/list`) to pass through. |
-|  | Dynamic MCP Context Extraction | Extracts MCP-specific context (tool names, arguments, and parameters) and maps it directly into AuthZEN resource and action fields. |
-|  | Tool-Level Authorization | Enables per-tool authorization by mapping MCP tool names (`params.name`) to AuthZEN resources. |
-|  | Argument-Driven Actions | Allows MCP tool arguments (e.g., `action=delete`) to dynamically define the AuthZEN `action.name`. |
+- **AuthZEN-compliant PEP** — Delegates authorization decisions to any AuthZEN-compatible PDP for APIs and MCP requests
+- **JWT-Based Subject Identification** — Extracts subject identity dynamically from JWT claims (e.g., `sub`, `preferred_username`)
+- **Dynamic JWT Context Extraction** — Maps JWT claims into AuthZEN `subject.properties` for attribute-based and relationship-based authorization
+- **Dynamic Resource & Action Mapping** — Builds AuthZEN resource identifiers from request URI, static values, or MCP context; maps HTTP methods or MCP tool arguments to actions
+- **Authenticated PDP Calls** — Supports static API keys and OAuth2 `client_credentials` for gateway→PDP authentication, with automatic token caching and renewal
+- **MCP-Aware Policy Enforcement** — Understands MCP JSON-RPC requests; enforces per-tool authorization with selective enforcement on specific methods
+- **OIDC/OAuth Integration** — Works alongside the APISIX OIDC plugin; assumes tokens are validated upstream before authorization
 
 
 ### Tested PDP Backends
 
 - **OpenFGA** - Relationship-based access control (ReBAC)
 - **Cerbos** - Policy-based access control (PBAC)
+- **Keycloak** - Resource-based policies authorization
 
 Should be compatible with **Any AuthZEN-compliant PDP**.
 
@@ -123,7 +108,7 @@ sequenceDiagram
     end
 ```
 
-## Attributes
+## Gateway AuthZEN Configuration
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
@@ -131,7 +116,13 @@ sequenceDiagram
 | pdp.host | string | Yes | | PDP base URL (e.g., `https://pdp.example.com`) |
 | pdp.platform | string | No | `default` | Platform type: `default`, `openfga`, `cerbos` |
 | pdp.model | string | No | `discover` | For OpenFGA: `discover` to auto-discover store_id, or specify store_id directly |
-| pdp.api_key | string | No | | API key for PDP authentication (sent as Authorization header) |
+| **pdp.auth** | object | No | | PDP authentication configuration |
+| pdp.auth.api_key | string | No | | Static API key sent as `Authorization` header (mutually exclusive with `oauth2`) |
+| pdp.auth.oauth2 | object | No | | OAuth2 `client_credentials` config for gateway→PDP auth (mutually exclusive with `api_key`) |
+| pdp.auth.oauth2.token_url | string | Yes* | | Token endpoint URL (e.g., Keycloak token endpoint) |
+| pdp.auth.oauth2.client_id | string | Yes* | | OAuth2 client ID |
+| pdp.auth.oauth2.client_secret | string | Yes* | | OAuth2 client secret (encrypted at rest) |
+| pdp.auth.oauth2.scopes | array | No | | Requested token scopes (space-joined) |
 | **http** | object | No | | HTTP client configuration |
 | http.timeout | integer | No | `3000` | Request timeout in milliseconds (1-60000) |
 | http.ssl_verify | boolean | No | `false` | Enable SSL certificate verification |
@@ -217,6 +208,17 @@ The plugin expects a standard AuthZEN response:
 | PDP unavailable | 503 Service Unavailable | Authorization service error |
 | Missing JWT claim | 401 Unauthorized | Required claim not found |
 
+
+## Considerations
+
+> [!CAUTION]
+> **Beta Software Notice: This software is currently in beta and is provided AS IS without any warranties.**
+>
+> - Not recommended for production use
+> - Issues and feedback should be reported via the GitHub issue tracker
+> - Maintenance and response times are best-effort
+>
+> By using this beta software, you acknowledge and accept these conditions.
 
 ## Examples
 
@@ -356,16 +358,18 @@ Include JWT claims as subject properties for attribute-based decisions:
 </details>
 
 <details>
-<summary><strong>Example 5: With API Key and HTTP Settings</strong></summary>
+<summary><strong>Example 5: With Static API Key and HTTP Settings</strong></summary>
 
-For PDPs requiring authentication with custom HTTP settings:
+For PDPs requiring authentication with a static API key:
 
 ```json
 {
   "pdp": {
     "host": "https://pdp.example.com",
     "platform": "default",
-    "api_key": "Bearer your-api-key-here"
+    "auth": {
+      "api_key": "Bearer your-api-key-here"
+    }
   },
   "http": {
     "timeout": 5000,
@@ -505,6 +509,50 @@ Enforce authorization only for `tools/call` requests, allowing other MCP methods
 → Request passes through without authorization
 
 **Note:** If the `mcp.enforce_on` configuration is not provided or `methods` is empty, all requests are enforced (backward compatible behavior).
+</details>
+
+<details>
+<summary><strong>Example 8: Keycloak Authorization Services as PDP (OAuth2 PDP Auth)</strong></summary>
+
+Use Keycloak's built-in AuthZEN endpoint (`KC_FEATURES=authzen`) as the PDP. The gateway authenticates to Keycloak using OAuth2 `client_credentials` — the token is fetched once, cached, and renewed automatically before expiry.
+
+**Prerequisites:**
+- Keycloak started with `KC_FEATURES=authzen`
+- A dedicated gateway client (`gateway-client`) with `authorizationServicesEnabled=true` and the relevant resources/policies configured
+
+```json
+{
+  "pdp": {
+    "host": "http://keycloak:8080/realms/demo/authzen",
+    "auth": {
+      "oauth2": {
+        "token_url": "http://keycloak:8080/realms/demo/protocol/openid-connect/token",
+        "client_id": "gateway-client",
+        "client_secret": "gateway-secret"
+      }
+    }
+  },
+  "subject": {
+    "type": "user",
+    "id": "claim::preferred_username"
+  },
+  "resource": {
+    "id": "todo-1",
+    "type": "todo"
+  },
+  "action": {
+    "name": "can_read_todos"
+  }
+}
+```
+
+**How it works:**
+1. On first request, the plugin calls Keycloak's token endpoint with `grant_type=client_credentials`
+2. The resulting access token is cached (TTL = `expires_in - 10s`) in the shared APISIX memory store
+3. Subsequent requests reuse the cached token; it is refreshed automatically when the cache expires
+4. If token renewal fails (e.g., client disabled), APISIX returns `503 Service Unavailable`
+5. Keycloak evaluates the AuthZEN request against the policies defined in `gateway-client`'s Authorization Services
+
 </details>
 
 ## References
