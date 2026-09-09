@@ -547,8 +547,21 @@ local function should_enforce_mcp(conf, ctx)
 
     -- Parse MCP body to get method
     local mcp_body, err = get_mcp_request_body(ctx)
+
+    -- JSON-RPC responses (e.g. a client's reply to a server-initiated
+    -- elicitation/sampling/roots request) carry "id" + "result"/"error"
+    -- but no "method". They aren't new actions to authorize - they're
+    -- correlated replies within an already-authorized session - so always
+    -- skip PDP enforcement for them.
+    if mcp_body and not mcp_body.method and mcp_body.id ~= nil
+        and (mcp_body.result ~= nil or mcp_body.error ~= nil) then
+        log.info("[authzen] MCP JSON-RPC response detected (id=", tostring(mcp_body.id),
+            "), skipping PDP enforcement")
+        return false
+    end
+
     if not mcp_body or not mcp_body.method then
-        
+
         -- Not a valid MCP request, enforce anyway
         log.debug("[authzen] could not parse MCP body or method not found, enforcing authorization")
         return true
