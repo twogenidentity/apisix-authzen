@@ -20,6 +20,7 @@ Features:
 - **Dynamic Resource & Action Mapping** — Builds AuthZEN resource identifiers from request URI, static values, or MCP context; maps HTTP methods or MCP tool arguments to actions
 - **Authenticated PDP Calls** — Supports static API keys and OAuth2 credentials for gateway → PDP authentication, with automatic token caching and renewal
 - **MCP-Aware Policy Enforcement** — Understands MCP JSON-RPC requests; enforces per-tool authorization with selective enforcement on specific methods
+- **CEL Mapping Format** — Optional `$token` / `$params` path expressions aligned with the [AuthZEN COAZ MCP binding](https://openid.github.io/authzen/authzen-coaz-mcp-binding-1_0.html), including `context` and resource/action properties
 - **OIDC/OAuth Integration** — Works alongside the APISIX OIDC plugin; assumes tokens are validated upstream before authorization
 
 
@@ -130,15 +131,19 @@ sequenceDiagram
 | http.keepalive | boolean | No | `true` | Enable HTTP keepalive connections |
 | http.keepalive_timeout | integer | No | `60000` | Keepalive timeout in milliseconds |
 | http.keepalive_pool | integer | No | `5` | Keepalive connection pool size |
+| **mapping_format** | string | No | `legacy` | Syntax of mapping values: `legacy` (see [Value Extraction Syntax](#value-extraction-syntax)) or `cel` (see [CEL Mapping Format](#cel-mapping-format)) |
 | **subject** | object | No | | Subject configuration for AuthZEN request |
 | subject.type | string | No | `identity` | Subject type in AuthZEN request |
-| subject.id | string | No | `claim::sub` | Subject ID source (see [Value Extraction Syntax](#value-extraction-syntax)) |
-| subject.properties | array | No | | Array of JWT claim mappings to subject properties |
+| subject.id | string | No | `claim::sub` / `$token.sub` | Subject ID source (legacy / cel default) |
+| subject.properties | array / map | No | | legacy: array of JWT claim mappings ([schema](#subject-properties-schema)). cel: map of key to expression or literal |
 | **resource** | object | No | | Resource configuration for AuthZEN request |
 | resource.type | string | No | `route` | Resource type in AuthZEN request |
-| resource.id | string | No | `uri` | Resource ID source (see [Value Extraction Syntax](#value-extraction-syntax)) |
+| resource.id | string | No | `uri` / `$request.uri` | Resource ID source (legacy / cel default) |
+| resource.properties | map | No | | cel only: map of key to expression or literal |
 | **action** | object | No | | Action configuration for AuthZEN request |
-| action.name | string | No | `method` | Action name source: `method` for HTTP method (see [Value Extraction Syntax](#value-extraction-syntax)) |
+| action.name | string | No | `method` / `$request.method` | Action name source (legacy / cel default) |
+| action.properties | map | No | | cel only: map of key to expression or literal |
+| **context** | map | No | | cel only: AuthZEN `context`, map of key to expression or literal |
 | **mcp** | object | No | | MCP (Model Context Protocol) configuration |
 | mcp.enforce_on | object | No | | Selective enforcement configuration |
 | mcp.enforce_on.methods | array | No | `[]` | MCP JSON-RPC methods to enforce authorization on (e.g., `["tools/call"]`). If empty, all requests are enforced. |
@@ -155,7 +160,7 @@ Each item in `subject.properties` array:
 
 ### Value Extraction Syntax
 
-The `subject.id`, `resource.id`, and `action.name` fields support dynamic value extraction using the following syntax:
+With `mapping_format: legacy` (the default), the `subject.id`, `resource.id`, and `action.name` fields support dynamic value extraction using the following syntax:
 
 | Syntax | Source | Example |
 |--------|--------|---------|
@@ -165,6 +170,58 @@ The `subject.id`, `resource.id`, and `action.name` fields support dynamic value 
 | `uri` | HTTP request URI | `/api/v1/products` |
 | `method` | HTTP method | `GET`, `POST` |
 | (static value) | Literal string | `user`, `document`, `read` |
+
+
+### CEL Mapping Format
+
+With `mapping_format: cel`, mapping values use the CEL path syntax of the [AuthZEN COAZ MCP binding](https://openid.github.io/authzen/authzen-coaz-mcp-binding-1_0.html). Only path lookups are supported, without operators, functions or index syntax:
+
+| Expression | Source | Example |
+|------------|--------|---------|
+| `$token.<path>` | JWT claim (nested paths allowed) | `$token.sub`, `$token.realm_access.roles` |
+| `$params.<path>` | MCP JSON-RPC `params` | `$params.name`, `$params.arguments.id` |
+| `$request.uri` | HTTP request URI | `/api/v1/products` |
+| `$request.method` | HTTP method | `GET`, `POST` |
+| `.?` | Optional step: the key is omitted when the value is missing | `$token.?azp` |
+| `$$...` | Escaped literal starting with `$` | `$$5` → `$5` |
+| (anything else) | Literal | `customer`, `tools/call` |
+
+Rules:
+
+- Expressions are validated when the route is created. Unsupported syntax is rejected by the Admin API.
+- A missing value without `.?` is a mapping error: the request is denied with `401` and the PDP is not called.
+- `.?` is not allowed on `subject.type`, `subject.id`, `resource.type`, `resource.id` and `action.name`. These must resolve to a string (numbers are converted).
+- `properties` and `context` values may resolve to any JSON value. A map whose entries are all missing is omitted.
+
+```yaml
+authzen:
+  pdp:
+    host: https://pdp.example.com
+  mapping_format: cel
+  subject:
+    type: identity
+    id: "$token.sub"
+    properties:
+      roles: "$token.?realm_access.roles"
+  resource:
+    type: customer
+    id: "$params.arguments.id"
+  action:
+    name: "$params.name"
+  context:
+    agent: "$token.?azp"
+  mcp:
+    enforce_on:
+      methods: ["tools/call"]
+```
+
+Equivalent names when migrating from agentgateway CEL:
+
+| agentgateway | this plugin |
+|---|---|
+| `jwt.sub` | `$token.sub` |
+| `jwt.azp` | `$token.azp` |
+| `mcp.tool.name` | `$params.name` |
 
 
 > **IMPORTANT:** This plugin assumes a valid JWT. You must configure the APISIX OIDC plugin with higher priority to validate the token before AuthZEN authorization is evaluated.
@@ -188,9 +245,14 @@ The plugin constructs AuthZEN-compliant requests following the specification:
   },
   "action": {
     "name": "<action_name>"
+  },
+  "context": {
+    "<key>": "<value>"
   }
 }
 ```
+
+`resource.properties`, `action.properties` and `context` are only sent in `cel` mapping format.
 
 ## AuthZEN Response Format
 
@@ -208,6 +270,7 @@ The plugin expects a standard AuthZEN response:
 | `decision: false` | 403 Forbidden | Access denied |
 | PDP unavailable | 503 Service Unavailable | Authorization service error |
 | Missing JWT claim | 401 Unauthorized | Required claim not found |
+| Mapping error (cel) | 401 Unauthorized | Required path missing or id not a string |
 
 
 ## Considerations
@@ -392,7 +455,7 @@ Authorize AI/MCP tool calls:
 ```json
 {
   "pdp": {
-    "host": "http://localhost:8080",
+    "host": "http://localhost:8080"
   },
   "subject": {
     "type": "user",
@@ -451,7 +514,7 @@ Enforce authorization only for `tools/call` requests, allowing other MCP methods
 ```json
 {
   "pdp": {
-    "host": "http://localhost:8080",
+    "host": "http://localhost:8080"
   },
   "mcp": {
     "enforce_on": {
@@ -556,9 +619,112 @@ Use Keycloak's built-in AuthZEN endpoint (`KC_FEATURES=authzen`) as the PDP. The
 
 </details>
 
+<details>
+<summary><strong>Example 9: MCP Tool Authorization with CEL Mapping Format</strong></summary>
+
+Map MCP tool calls with the CEL path syntax of the [AuthZEN COAZ MCP binding](https://openid.github.io/authzen/authzen-coaz-mcp-binding-1_0.html), including tool arguments, optional claims and `context`:
+
+**Plugin Configuration:**
+```json
+{
+  "pdp": {
+    "host": "http://localhost:8080"
+  },
+  "mapping_format": "cel",
+  "mcp": {
+    "enforce_on": {
+      "methods": ["tools/call"]
+    }
+  },
+  "subject": {
+    "type": "user",
+    "id": "$token.sub",
+    "properties": {
+      "roles": "$token.?realm_access.roles"
+    }
+  },
+  "resource": {
+    "type": "customer",
+    "id": "$params.arguments.id",
+    "properties": {
+      "case": "$params.arguments.?case"
+    }
+  },
+  "action": {
+    "name": "$params.name"
+  },
+  "context": {
+    "agent": "$token.?azp"
+  }
+}
+```
+
+**Access token claims:**
+```json
+{
+  "sub": "alice@example.com",
+  "azp": "mcp-client",
+  "realm_access": { "roles": ["support"] }
+}
+```
+
+**MCP Request Body:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "get_customer",
+    "arguments": {
+      "id": "cust-12345",
+      "case": "c-9"
+    }
+  }
+}
+```
+
+**AuthZEN request sent to PDP:**
+```json
+{
+  "subject": {
+    "type": "user",
+    "id": "alice@example.com",
+    "properties": {
+      "roles": ["support"]
+    }
+  },
+  "resource": {
+    "type": "customer",
+    "id": "cust-12345",
+    "properties": {
+      "case": "c-9"
+    }
+  },
+  "action": {
+    "name": "get_customer"
+  },
+  "context": {
+    "agent": "mcp-client"
+  }
+}
+```
+
+**Behavior:**
+
+| Situation | Result |
+|-----------|--------|
+| Token without `azp` or `realm_access` | `context` and `subject.properties` are omitted |
+| Call without the `case` argument | `resource.properties` is omitted |
+| Call without the `id` argument | `401` mapping error, PDP not called |
+| `initialize`, `tools/list` | Skipped (allowed), as in Example 7 |
+
+</details>
+
 ## References
 
 - [AuthZEN Specification](https://openid.net/specs/openid-authzen-authorization-api-1_0-ID1.html)
+- [AuthZEN COAZ MCP Binding](https://openid.github.io/authzen/authzen-coaz-mcp-binding-1_0.html)
 - [OpenID Foundation AuthZEN Working Group](https://openid.net/wg/authzen/)
 - [OpenFGA](https://openfga.dev/)
 - [Cerbos](https://cerbos.dev/)
