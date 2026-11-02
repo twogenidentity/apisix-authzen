@@ -5,6 +5,8 @@ Routes created here:
   /api/test            — standard route, PDP = mock-pdp
   /api/test-timeout    — same plugin, 500 ms timeout (for slow-PDP test)
   /api/test-unreachable — PDP host does not exist (connection failure)
+
+Every test runs once per mapping_format (legacy, cel) with equivalent mappings.
 """
 
 import time
@@ -32,13 +34,26 @@ _UPSTREAM = {
 }
 
 
-@pytest.fixture(scope="module", autouse=True)
-def api_routes():
+# Equivalent of the legacy defaults (claim::sub, uri, method) in each mapping_format
+_MAPPINGS = {
+    "legacy": {},
+    "cel": {
+        "mapping_format": "cel",
+        "subject": {"id": "$token.sub"},
+        "resource": {"id": "$request.uri"},
+        "action": {"name": "$request.method"},
+    },
+}
+
+
+@pytest.fixture(scope="module", autouse=True, params=list(_MAPPINGS))
+def api_routes(request):
+    mapping = _MAPPINGS[request.param]
     admin_put("/apisix/admin/routes/api-test", {
         "uri": "/api/test",
         "methods": ["GET", "POST", "PUT", "DELETE"],
         "upstream": _UPSTREAM,
-        "plugins": {"authzen": _AUTHZEN_PLUGIN},
+        "plugins": {"authzen": {**_AUTHZEN_PLUGIN, **mapping}},
     })
     admin_put("/apisix/admin/routes/api-test-timeout", {
         "uri": "/api/test-timeout",
@@ -47,6 +62,7 @@ def api_routes():
         "plugins": {"authzen": {
             "pdp": {"host": "http://mock-pdp:8080"},
             "http": {"timeout": 500},
+            **mapping,
         }},
     })
     admin_put("/apisix/admin/routes/api-test-unreachable", {
@@ -55,6 +71,7 @@ def api_routes():
         "upstream": _UPSTREAM,
         "plugins": {"authzen": {
             "pdp": {"host": "http://no-such-pdp-host:9999"},
+            **mapping,
         }},
     })
     time.sleep(1)  # let APISIX propagate routes from etcd

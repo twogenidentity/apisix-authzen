@@ -122,31 +122,15 @@ local schema = {
                 },
                 id = {
                     type = "string",
-                    default = "claim::sub",
-                    description = "Subject ID source: 'claim::<name>' for JWT claim, 'mcp::tool::name' for MCP tool name, 'mcp::tool::arguments::<arg>' for MCP arguments, or static value"
+                    description = "Subject ID source. legacy (default 'claim::sub'): 'claim::<name>' for JWT claim, 'mcp::tool::name' for MCP tool name, 'mcp::tool::arguments::<arg>' for MCP arguments, or static value. cel (default '$token.sub'): expression or literal"
                 },
                 properties = {
-                    type = "array",
-                    items = {
-                        type = "object",
-                        properties = {
-                            key = {
-                                type = "string",
-                                description = "Property name in AuthZEN request"
-                            },
-                            claim = {
-                                type = "string",
-                                description = "JWT claim path (e.g., 'realm_access.roles')"
-                            }
-                        },
-                        required = {"key", "claim"}
-                    },
-                    description = "Array of JWT claim mappings to subject properties"
+                    -- legacy: array of {key, claim} (checked in check_schema); cel: map of key -> expression or literal
+                    description = "legacy: array of JWT claim mappings to subject properties. cel: map of property name to expression or literal"
                 }
             },
             default = {
-                type = "identity",
-                id = "claim::sub"
+                type = "identity"
             }
         },
         resource = {
@@ -159,13 +143,15 @@ local schema = {
                 },
                 id = {
                     type = "string",
-                    default = "uri",
-                    description = "Resource ID source: 'uri' for request URI, 'claim::<name>' for JWT claim, 'mcp::tool::name' for MCP tool name, 'mcp::tool::arguments::<arg>' for MCP arguments, or static value"
+                    description = "Resource ID source. legacy (default 'uri'): 'uri' for request URI, 'claim::<name>' for JWT claim, 'mcp::tool::name' for MCP tool name, 'mcp::tool::arguments::<arg>' for MCP arguments, or static value. cel (default '$request.uri'): expression or literal"
+                },
+                properties = {
+                    type = "object",
+                    description = "cel only: map of property name to expression or literal"
                 }
             },
             default = {
-                type = "route",
-                id = "uri"
+                type = "route"
             }
         },
         action = {
@@ -173,13 +159,23 @@ local schema = {
             properties = {
                 name = {
                     type = "string",
-                    default = "method",
-                    description = "Action name source: 'method' for HTTP method, 'claim::<name>' for JWT claim, 'mcp::tool::name' for MCP tool name, 'mcp::tool::arguments::<arg>' for MCP arguments, or static value"
+                    description = "Action name source. legacy (default 'method'): 'method' for HTTP method, 'claim::<name>' for JWT claim, 'mcp::tool::name' for MCP tool name, 'mcp::tool::arguments::<arg>' for MCP arguments, or static value. cel (default '$request.method'): expression or literal"
+                },
+                properties = {
+                    type = "object",
+                    description = "cel only: map of property name to expression or literal"
                 }
-            },
-            default = {
-                name = "method"
             }
+        },
+        context = {
+            type = "object",
+            description = "cel only: map of AuthZEN context key to expression or literal"
+        },
+        mapping_format = {
+            type = "string",
+            enum = {"legacy", "cel"},
+            default = "legacy",
+            description = "Syntax of subject/resource/action/context values: 'legacy' (claim::, mcp::, uri, method) or 'cel' ($token.<path>, $params.<path>, $request.uri, $request.method, with '.?' optional steps)"
         },
         mcp = {
             type = "object",
@@ -212,13 +208,169 @@ local schema = {
 }
 
 
+local legacy_subject_properties_schema = {
+    type = "array",
+    items = {
+        type = "object",
+        properties = {
+            key = {
+                type = "string",
+                description = "Property name in AuthZEN request"
+            },
+            claim = {
+                type = "string",
+                description = "JWT claim path (e.g., 'realm_access.roles')"
+            }
+        },
+        required = {"key", "claim"}
+    }
+}
+
+
 local _M = {
-    version = 0.3,
+    version = 0.4,
     priority = 2599,
     name = plugin_name,
     schema = schema,
     encrypt_fields = {"pdp.auth.oauth2.client_secret"}
 }
+
+
+-- cel mapping_format: required AuthZEN fields and their defaults
+local cel_required_fields = {
+    { "subject",  "type", "identity" },
+    { "subject",  "id",   "$token.sub" },
+    { "resource", "type", "route" },
+    { "resource", "id",   "$request.uri" },
+    { "action",   "name", "$request.method" },
+}
+
+-- cel mapping_format: key -> value maps (path in conf, name for errors)
+local cel_map_fields = {
+    { "subject",  "properties", "subject.properties" },
+    { "resource", "properties", "resource.properties" },
+    { "action",   "properties", "action.properties" },
+    { nil,        "context",    "context" },
+}
+
+local cel_roots = { token = true, params = true, request = true }
+local cel_request_fields = { uri = true, method = true }
+local cel_cache = {}
+
+
+-- Compiles a cel mapping value. Strings starting with '$' are path expressions
+-- ($token.<path>, $params.<path>, $request.uri, $request.method) where any step
+-- may be optional ('.?'); '$$' escapes a literal '$'. Anything else is a literal.
+local function compile_cel_value(value)
+    if type(value) ~= "string" or value:sub(1, 1) ~= "$" then
+        return { is_literal = true, value = value }
+    end
+    if value:sub(2, 2) == "$" then
+        return { is_literal = true, value = value:sub(2) }
+    end
+    if cel_cache[value] then
+        return cel_cache[value]
+    end
+
+    local expr = value:sub(2)
+    local root, pos = expr:match("^([%a_][%w_]*)()")
+    if not root or not cel_roots[root] then
+        return nil, "unsupported expression '" .. value .. "': must start with $token, $params or $request"
+    end
+
+    local steps = {}
+    local optional = false
+    while pos <= #expr do
+        local opt, name, next_pos = expr:match("^%.(%??)([%a_][%w_]*)()", pos)
+        if not name then
+            return nil, "unsupported expression '" .. value .. "': only dotted paths with optional '.?' steps are allowed"
+        end
+        steps[#steps + 1] = { name = name, optional = opt == "?" }
+        optional = optional or opt == "?"
+        pos = next_pos
+    end
+
+    if #steps == 0 then
+        return nil, "unsupported expression '" .. value .. "': must select a field"
+    end
+    if root == "request" and (#steps ~= 1 or steps[1].optional or not cel_request_fields[steps[1].name]) then
+        return nil, "unsupported expression '" .. value .. "': $request supports only .uri and .method"
+    end
+
+    local node = { root = root, steps = steps, optional = optional, source = value }
+    cel_cache[value] = node
+    return node
+end
+
+
+local function is_map(t)
+    if type(t) ~= "table" then
+        return false
+    end
+    for k in pairs(t) do
+        if type(k) ~= "string" then
+            return false
+        end
+    end
+    return true
+end
+
+
+local function get_cel_map(conf, section, key)
+    if section then
+        return conf[section] and conf[section][key]
+    end
+    return conf[key]
+end
+
+
+local function check_mapping(conf)
+    if conf.mapping_format ~= "cel" then
+        for _, f in ipairs(cel_map_fields) do
+            if f[3] ~= "subject.properties" and get_cel_map(conf, f[1], f[2]) ~= nil then
+                return false, f[3] .. " requires mapping_format 'cel'"
+            end
+        end
+        if conf.subject and conf.subject.properties ~= nil then
+            local ok, err = core.schema.check(legacy_subject_properties_schema, conf.subject.properties)
+            if not ok then
+                return false, "subject.properties: " .. err
+            end
+        end
+        return true
+    end
+
+    for _, f in ipairs(cel_required_fields) do
+        local value = conf[f[1]] and conf[f[1]][f[2]]
+        if value ~= nil then
+            local field = f[1] .. "." .. f[2]
+            local node, err = compile_cel_value(value)
+            if not node then
+                return false, field .. ": " .. err
+            end
+            if node.optional then
+                return false, field .. ": '.?' is not allowed on required fields"
+            end
+        end
+    end
+
+    for _, f in ipairs(cel_map_fields) do
+        local map = get_cel_map(conf, f[1], f[2])
+        if map ~= nil then
+            if not is_map(map) then
+                return false, f[3] .. " must be a map of key to expression or literal in cel mode"
+            end
+            for key, value in pairs(map) do
+                local node, err = compile_cel_value(value)
+                if not node then
+                    return false, f[3] .. "." .. key .. ": " .. err
+                end
+            end
+        end
+    end
+
+    return true
+end
 
 
 function _M.check_schema(conf)
@@ -230,7 +382,7 @@ function _M.check_schema(conf)
     if auth and auth.api_key and auth.oauth2 then
         return false, "pdp.auth.api_key and pdp.auth.oauth2 are mutually exclusive"
     end
-    return true
+    return check_mapping(conf)
 end
 
 
@@ -658,6 +810,135 @@ local function build_subject_properties(conf_properties, jwt_payload)
 end
 
 
+-- Returned by eval_cel when an optional ('.?') path is missing
+local ABSENT = {}
+
+
+local function get_cel_root(root, ctx)
+    if root == "token" then
+        if not ctx.authzen_jwt_payload then
+            local payload, err = get_jwt_payload(core.request.header(ctx, "Authorization"))
+            if not payload then
+                return nil, err
+            end
+            ctx.authzen_jwt_payload = payload
+        end
+        return ctx.authzen_jwt_payload
+    elseif root == "params" then
+        local body = get_mcp_request_body(ctx)
+        return type(body) == "table" and body.params or nil
+    end
+    return { uri = ctx.var.uri, method = ctx.var.request_method }
+end
+
+
+local function eval_cel(node, ctx)
+    if node.is_literal then
+        return node.value
+    end
+
+    local value, err = get_cel_root(node.root, ctx)
+    if err then
+        return nil, err
+    end
+
+    -- once a step is optional, the rest of the path is optional too (CEL semantics)
+    local optional = false
+    for _, step in ipairs(node.steps) do
+        optional = optional or step.optional
+        if type(value) == "table" then
+            value = value[step.name]
+        else
+            value = nil
+        end
+        if value == nil or value == ngx.null then
+            if optional then
+                return ABSENT
+            end
+            return nil, "'" .. node.source .. "' not found"
+        end
+    end
+    return value
+end
+
+
+local function resolve_cel_string(value, ctx)
+    local node, err = compile_cel_value(value)
+    if not node then
+        return nil, err
+    end
+    local result, err = eval_cel(node, ctx)
+    if result == nil then
+        return nil, err
+    end
+    if type(result) == "number" then
+        if result == math.floor(result) and math.abs(result) < 2^53 then
+            return string.format("%d", result)
+        end
+        return tostring(result)
+    end
+    if type(result) ~= "string" then
+        return nil, "must resolve to a string"
+    end
+    return result
+end
+
+
+-- Returns the resolved map, or nil when every entry was optional and missing
+local function resolve_cel_map(map, ctx, field)
+    if not map then
+        return nil
+    end
+    local resolved = {}
+    for key, value in pairs(map) do
+        local node, err = compile_cel_value(value)
+        if not node then
+            return nil, field .. "." .. key .. ": " .. err
+        end
+        local result, err = eval_cel(node, ctx)
+        if result == nil then
+            return nil, field .. "." .. key .. ": " .. err
+        end
+        if result ~= ABSENT then
+            resolved[key] = result
+        end
+    end
+    if next(resolved) == nil then
+        return nil
+    end
+    return resolved
+end
+
+
+local function build_authzen_request_cel(conf, ctx)
+    local authzen_request = { subject = {}, resource = {}, action = {} }
+
+    for _, f in ipairs(cel_required_fields) do
+        local section, key = f[1], f[2]
+        local value = conf[section] and conf[section][key] or f[3]
+        local result, err = resolve_cel_string(value, ctx)
+        if not result then
+            return nil, "mapping error: " .. section .. "." .. key .. ": " .. err
+        end
+        authzen_request[section][key] = result
+    end
+
+    for _, f in ipairs(cel_map_fields) do
+        local resolved, err = resolve_cel_map(get_cel_map(conf, f[1], f[2]), ctx, f[3])
+        if err then
+            return nil, "mapping error: " .. err
+        end
+        if f[1] then
+            authzen_request[f[1]][f[2]] = resolved
+        else
+            authzen_request[f[2]] = resolved
+        end
+    end
+
+    return authzen_request, nil
+end
+
+
 local function get_subject_id(conf, ctx)
     local subject_id_source = conf.subject and conf.subject.id or "claim::sub"
     return resolve_value(subject_id_source, ctx)
@@ -699,6 +980,10 @@ end
 
 local function build_authzen_request(conf, ctx)
     -- trace_request(ctx)
+
+    if conf.mapping_format == "cel" then
+        return build_authzen_request_cel(conf, ctx)
+    end
 
     local subject_id, err = get_subject_id(conf, ctx)
     if not subject_id then

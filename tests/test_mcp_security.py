@@ -13,6 +13,8 @@ Key security properties verified:
   - initialize / tools/list skip PDP (pass through when allowed)
   - GET (SSE) and DELETE (session termination) skip PDP
   - PDP unavailability yields 503 for enforced methods
+
+Every test runs once per mapping_format (legacy, cel) with equivalent mappings.
 """
 
 import time
@@ -41,22 +43,44 @@ _UPSTREAM_NGINX = {
     "type": "roundrobin",
 }
 
+# Equivalent mappings per mapping_format
 _AUTHZEN_MCP = {
-    "pdp": {"host": "http://mock-pdp:8080"},
-    "subject": {"type": "user", "id": "claim::sub"},
-    "resource": {"type": "tool", "id": "mcp::tool::name"},
-    "action": {"name": "execute"},
-    "mcp": {
-        "enforce_on": {"methods": ["tools/call"]},
+    "legacy": {
+        "pdp": {"host": "http://mock-pdp:8080"},
+        "subject": {"type": "user", "id": "claim::sub"},
+        "resource": {"type": "tool", "id": "mcp::tool::name"},
+        "action": {"name": "execute"},
+        "mcp": {
+            "enforce_on": {"methods": ["tools/call"]},
+        },
+    },
+    "cel": {
+        "pdp": {"host": "http://mock-pdp:8080"},
+        "mapping_format": "cel",
+        "subject": {"type": "user", "id": "$token.sub"},
+        "resource": {"type": "tool", "id": "$params.name"},
+        "action": {"name": "execute"},
+        "mcp": {
+            "enforce_on": {"methods": ["tools/call"]},
+        },
     },
 }
 
 _AUTHZEN_MCP_STRICT = {
-    "pdp": {"host": "http://mock-pdp:8080"},
-    "subject": {"type": "user", "id": "claim::sub"},
-    "resource": {"type": "route", "id": "uri"},
-    "action": {"name": "method"},
-    # No mcp.enforce_on → all requests are enforced (backward-compatible default)
+    "legacy": {
+        "pdp": {"host": "http://mock-pdp:8080"},
+        "subject": {"type": "user", "id": "claim::sub"},
+        "resource": {"type": "route", "id": "uri"},
+        "action": {"name": "method"},
+        # No mcp.enforce_on → all requests are enforced (backward-compatible default)
+    },
+    "cel": {
+        "pdp": {"host": "http://mock-pdp:8080"},
+        "mapping_format": "cel",
+        "subject": {"type": "user", "id": "$token.sub"},
+        "resource": {"type": "route", "id": "$request.uri"},
+        "action": {"name": "$request.method"},
+    },
 }
 
 
@@ -64,19 +88,19 @@ def mcp_body(method: str, params: dict | None = None) -> dict:
     return {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
 
 
-@pytest.fixture(scope="module", autouse=True)
-def mcp_routes():
+@pytest.fixture(scope="module", autouse=True, params=["legacy", "cel"])
+def mcp_routes(request):
     admin_put("/apisix/admin/routes/mcp-selective", {
         "uri": "/mcp",
         "methods": ["GET", "POST", "DELETE"],
         "upstream": _UPSTREAM_MCP,
-        "plugins": {"authzen": _AUTHZEN_MCP},
+        "plugins": {"authzen": _AUTHZEN_MCP[request.param]},
     })
     admin_put("/apisix/admin/routes/mcp-strict", {
         "uri": "/mcp-strict",
         "methods": ["GET", "POST", "DELETE"],
         "upstream": _UPSTREAM_NGINX,
-        "plugins": {"authzen": _AUTHZEN_MCP_STRICT},
+        "plugins": {"authzen": _AUTHZEN_MCP_STRICT[request.param]},
     })
     time.sleep(1)
     yield
